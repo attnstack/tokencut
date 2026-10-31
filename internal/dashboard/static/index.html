@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<!-- tokencut dashboard: zero-dependency single page; polls /api/stats every 2s -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tokencut dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0f14; color:#d7dee7; margin:0; padding:24px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:#7d8b99; font-size:13px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:24px; }
+  .card { background:#111820; border:1px solid #1e2a36; border-radius:10px; padding:14px 16px; }
+  .card .k { color:#7d8b99; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  .card .v { font-size:24px; font-weight:600; margin-top:6px; }
+  .card .v.money { color:#4ade80; }
+  table { width:100%; border-collapse:collapse; background:#111820; border:1px solid #1e2a36; border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 12px; font-size:13px; border-bottom:1px solid #1a2430; }
+  th { color:#7d8b99; font-weight:500; }
+  tr:last-child td { border-bottom:none; }
+  section { margin-bottom:24px; }
+  section h2 { font-size:14px; color:#9fb0c0; margin:0 0 8px; }
+</style>
+</head>
+<body>
+<h1>tokencut</h1>
+<div class="sub" id="meta">loading…</div>
+<div class="grid">
+  <div class="card"><div class="k">Requests</div><div class="v" id="requests">–</div></div>
+  <div class="card"><div class="k">Compression ratio</div><div class="v" id="ratio">–</div></div>
+  <div class="card"><div class="k">Tokens original</div><div class="v" id="orig">–</div></div>
+  <div class="card"><div class="k">Tokens sent</div><div class="v" id="final">–</div></div>
+  <div class="card"><div class="k">Saved USD (est.)</div><div class="v money" id="usd">–</div></div>
+  <div class="card"><div class="k">Cache hits</div><div class="v" id="hits">–</div></div>
+</div>
+<section><h2>Strategies</h2><table id="strategies"><thead><tr><th>Strategy</th><th>Messages</th></tr></thead><tbody></tbody></table></section>
+<section><h2>Models</h2><table id="models"><thead><tr><th>Model</th><th>Requests</th><th>Tokens orig</th><th>Tokens final</th><th>Saved USD</th></tr></thead><tbody></tbody></table></section>
+<section><h2>Recent requests</h2><table id="recent"><thead><tr><th>Time</th><th>Model</th><th>Orig</th><th>Final</th><th>Ratio</th><th>Strategies</th><th>ms</th></tr></thead><tbody></tbody></table></section>
+<script>
+const fmt = n => (n ?? 0).toLocaleString();
+async function refresh() {
+  try {
+    const s = await (await fetch('/api/stats')).json();
+    document.getElementById('meta').textContent = `v${s.version} · uptime ${Math.floor(s.uptime_seconds)}s · token counts are estimates`;
+    document.getElementById('requests').textContent = fmt(s.requests_total);
+    document.getElementById('ratio').textContent = (100*(s.compression_ratio||0)).toFixed(1) + '%';
+    document.getElementById('orig').textContent = fmt(s.tokens_original);
+    document.getElementById('final').textContent = fmt(s.tokens_final);
+    document.getElementById('usd').textContent = '$' + (s.saved_usd||0).toFixed(4);
+    document.getElementById('hits').textContent = fmt(s.cache_hits_total);
+    const fill = (id, rows) => {
+      document.querySelector(`#${id} tbody`).innerHTML = rows || '<tr><td colspan="7" style="color:#556">no data yet</td></tr>';
+    };
+    fill('strategies', Object.entries(s.strategies||{}).sort((a,b)=>b[1]-a[1])
+      .map(([k,v]) => `<tr><td>${k}</td><td>${fmt(v)}</td></tr>`).join(''));
+    fill('models', Object.entries(s.models||{})
+      .map(([k,v]) => `<tr><td>${k||'-'}</td><td>${fmt(v.requests)}</td><td>${fmt(v.tokens_original)}</td><td>${fmt(v.tokens_final)}</td><td>$${(v.saved_usd||0).toFixed(4)}</td></tr>`).join(''));
+    fill('recent', (s.recent||[]).slice().reverse().slice(0,30)
+      .map(r => `<tr><td>${new Date(r.time).toLocaleTimeString()}</td><td>${r.model||'-'}</td><td>${fmt(r.original_tokens)}</td><td>${fmt(r.final_tokens)}</td><td>${(100*(r.ratio||0)).toFixed(0)}%</td><td>${Object.keys(r.strategies||{}).join(',')||'-'}</td><td>${(r.compress_ms||0).toFixed(1)}</td></tr>`).join(''));
+  } catch (e) {
+    document.getElementById('meta').textContent = 'stats unavailable: ' + e;
+  }
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

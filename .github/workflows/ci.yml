@@ -1,0 +1,64 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.22.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race ./...
+      - name: fuzz (15s smoke)
+        run: go test -run='^$' -fuzz FuzzPruneJSON -fuzztime 15s ./internal/compress
+
+  bench-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build
+        run: go build -o bin/tokencut ./cmd/tokencut
+      - name: generate tasks
+        run: python bench/gen_tasks.py
+      - name: start proxy with mock upstream
+        run: |
+          ./bin/tokencut --mock-upstream &
+          sleep 2
+      - name: dry-run benchmark smoke (mock reference solver, offline)
+        run: |
+          cd bench && python run.py --dry-run --limit 8 --runs 1
+      - name: score & assert pipeline health
+        run: |
+          python bench/judge.py
+          python - <<'EOF'
+          import json, pathlib, sys
+          s = json.loads(pathlib.Path("bench/summary.json").read_text())
+          # Pipeline health gate (mock solver, not model quality):
+          # uncompressed and lossless tiers must be 100% for exact-check subsets.
+          bad = []
+          for key, v in s.items():
+              subset, tier = key.split("|")
+              if subset in ("t1_json_qa", "t2_log_triage", "t4_record_qa") and tier in ("none", "lossless"):
+                  if v["success_rate"] != 1.0:
+                      bad.append((key, v["success_rate"]))
+          if bad:
+              print("PIPELINE HEALTH FAILURE:", bad)
+              sys.exit(1)
+          print("pipeline health ok")
+          EOF
