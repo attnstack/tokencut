@@ -1,0 +1,25 @@
+# build
+bin/
+*.exe
+
+# go caches (dev machine: C: is full, redirected to project dir)
+.gocache/
+.gotmp/
+
+# local config & data
+config.yaml
+*.jsonl.gz
+
+# benchmark artifacts (regenerable; gen_tasks.py regenerates tasks.jsonl
+# byte-identically from the fixed seed)
+bench/results*.jsonl
+bench/summary.json
+bench/pareto.png
+bench/tasks.jsonl
+bench/__pycache__/
+
+# fuzz crash corpus stays committed under internal/compress/testdata/
+bench/results-scored.judgecache.json
+
+# private planning docs (not part of the public repo)
+技术方案.md

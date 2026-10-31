@@ -1,0 +1,59 @@
+# tokencut 配置样例。复制为 config.yaml 后按需修改；所有项都有内置默认值，
+# 完整默认值见 internal/config/config.go。环境变量 TOKENCUT_LISTEN /
+# TOKENCUT_UPSTREAM / TOKENCUT_TIER / TOKENCUT_STATS_JSONL 可覆盖对应项。
+
+listen: "127.0.0.1:8787"
+upstream: "https://api.openai.com"
+
+# 全局默认档位：lossless | balanced | aggressive
+# 单请求可用顶层字段 "tokencut": {"tier": "...", "target": 0.7, "enabled": false} 覆盖，
+# 该字段在转发前被剥除，上游永远看不到。
+tier: balanced
+
+# 各档位的目标压缩率（0-1）。balanced=压掉 60%，即只发 40% 的 token。
+targets: {balanced: 0.60, aggressive: 0.90, lossless: 0.0}
+
+# 豁免规则：这些消息只做无损处理。压缩它们最伤任务成功率。
+exempt:
+  system: true
+  last_user: true
+
+cache:
+  enabled: true
+  capacity: 1024        # LRU 条目数（键 = 内容指纹 + 档位）
+
+# 请求内 diff：同内容小幅改动只发变更集（见 README「跨轮去重与 diff」）
+diff_mode: true
+
+# 整个请求的压缩墙钟预算；超时后剩余消息原样透传（fail-open）
+latency_budget_ms: 30
+max_body_bytes: 33554432   # 32MB，超过则整请求不压缩直接转发
+rate_rps: 0                # 0 = 不限流；>0 启用令牌桶限流
+
+# token 估算常数（字符/token），按内容类型区分。由 bench/calibrate.py 对
+# tiktoken cl100k_base 在 benchmark 语料上拟合（2026-10-31）；o200k_base 的
+# ASCII 常数与之一致（±1%）。已知残差：JSON 类内部因词汇差异约有 ±17% 方差，
+# 只影响预算逼近与节省金额的精度，不影响输出合法性（见 methodology §2）。
+tokenest:
+  json_chars_per_token: 3.12
+  log_chars_per_token: 2.34
+  code_chars_per_token: 3.80
+  text_chars_per_token: 4.46
+  wide_chars_per_token: 0.74
+
+json_pruner:
+  long_string_cap: 2000     # 单个字符串值超过该 rune 数则截断加标记
+  keyword_sample: 2         # 折叠数组时按查询关键词保留的相关项数
+
+# 高价值 key 词典：命中者折叠时保留原值（模型做后续工具调用要用它们）
+high_value_keys: [id, name, type, status, error, code, message, url, data, key, path, file]
+
+# 节省金额估算（USD / 1M tokens，输入价）。只配了的模型才会出 saved-usd。
+pricing:
+  "gpt-4o-mini": {input: 0.15, output: 0.60}
+  "gpt-4o": {input: 2.50, output: 10.00}
+
+# 观测事件 JSONL 追加文件（可选；空 = 只存内存）
+stats_jsonl: ""
+
+log_level: info
