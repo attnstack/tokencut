@@ -16,6 +16,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,7 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dashboard", dashboard.Handler(s.rec))
 	mux.HandleFunc("GET /api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		b, _ := jsonMarshal(s.rec.Snapshot())
+		b, _ := json.Marshal(s.rec.Snapshot())
 		_, _ = w.Write(b)
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {

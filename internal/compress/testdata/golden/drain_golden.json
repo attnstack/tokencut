@@ -1,0 +1,18 @@
+[
+ {
+  "name": "drain-0",
+  "output": "[logdrain] 5000 lines -\u003e 1 templates; per-line variable values dropped, samples below\nx5000 \u003c*\u003e \u003c*\u003e INFO GET \u003c*\u003e \u003c*\u003e \u003c*\u003e\n  vars: 2026-10-31 10:00:00 /api/users/0 200 0ms | 2026-10-31 10:00:00 /api/users/3600 200 0ms | 2026-10-31 10:00:01 /api/users/1 200 1ms | 2026-10-31 10:00:01 /api/users/3601 200 1ms | 2026-10-31 10:00:02 /api/users/2 200 2ms (+4995 distinct)\n"
+ },
+ {
+  "name": "drain-1",
+  "output": "[logdrain] 3000 lines -\u003e 3 templates; per-line variable values dropped, samples below\nx1000 \u003c*\u003e ERROR Failed to connect to \u003c*\u003e (timeout after \u003c*\u003e\n  vars: 2026-10-31 10.0.3.18:5432 2000ms) (+0 distinct)\nx1000 \u003c*\u003e WARN slow upstream \u003c*\u003e responded in \u003c*\u003e\n  vars: 2026-10-31 10.9.1.2:6379 900ms (+0 distinct)\nx1000 INFO healthcheck ok\n"
+ },
+ {
+  "name": "drain-2",
+  "output": "[logdrain] 800 lines -\u003e 1 templates; per-line variable values dropped, samples below\nx800 \u003c*\u003e \u003c*\u003e \u003c*\u003e processed job \u003c*\u003e in \u003c*\u003e\n  vars: 2026-11-01 09:00:00.000 worker-0 0 0ms | 2026-11-01 09:00:01.001 worker-1 1 1ms | 2026-11-01 09:00:02.002 worker-2 2 2ms | 2026-11-01 09:00:03.003 worker-3 3 3ms | 2026-11-01 09:00:04.004 worker-4 4 4ms (+795 distinct)\n"
+ },
+ {
+  "name": "drain-3",
+  "output": "NOT_OK:too few lines to mine"
+ }
+]

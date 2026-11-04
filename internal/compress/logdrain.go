@@ -11,7 +11,6 @@ package compress
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -49,26 +48,20 @@ type dtTemplate struct {
 	capped  bool
 }
 
-var (
-	reNum   = regexp.MustCompile(`^-?\d+([.,]\d+)?$`)
-	reHex   = regexp.MustCompile(`^[0-9a-fA-F]{8,}$`)
-	reUUID  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reIP    = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}$`)
-	reTrail = regexp.MustCompile(`[",;:)\]!]+$`)
-)
-
 // maskToken marks variable-looking tokens. UUIDs/IPs/hex become <*> whole
 // (an IP:PORT must stay ONE variable — splitting "host:<*>" would strand the
-// port outside every sample); "status=200" keeps its key ("status=<*>", the
-// logfmt case, '=' only); any other digit-bearing token becomes <*>.
+// port outside every sample); "status=200" keeps its key ("status=<*>" — the
+// logfmt case, '=' only); any other digit-bearing token also becomes <*>.
+// All shape checks are hand-rolled byte scans: maskToken runs once per token
+// (~60k times per 10k-line log), and regex calls dominated its cost.
 func maskToken(tok string) (string, bool) {
-	t := reTrail.ReplaceAllString(tok, "")
-	hasDigit := strings.ContainsAny(t, "0123456789")
-	if reUUID.MatchString(t) || reIP.MatchString(t) || (reHex.MatchString(t) && hasDigit) {
+	t := stripTrailingPunct(tok)
+	hasDigit := fastIndexDigit(t)
+	if isUUID(t) || isIPv4(t) || (isHex(t) && hasDigit) {
 		return "<*>", true
 	}
 	if i := strings.IndexByte(t, '='); i >= 0 && i+1 < len(t) {
-		if reNum.MatchString(t[i+1:]) {
+		if isNumericToken(t[i+1:]) {
 			return t[:i+1] + "<*>", true
 		}
 	}
@@ -78,9 +71,118 @@ func maskToken(tok string) (string, bool) {
 	return tok, false
 }
 
+func fastIndexDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// stripTrailingPunct matches the old [",;:)\]!]+$ regex exactly.
+func stripTrailingPunct(s string) string {
+	j := len(s)
+	for j > 0 {
+		switch s[j-1] {
+		case '"', ',', ';', ':', ')', ']', '!':
+			j--
+		default:
+			return s[:j]
+		}
+	}
+	return s[:j]
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func isHex(s string) bool {
+	if len(s) < 8 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isHexByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isUUID matches the 8-4-4-4-12 hex layout exactly (what the old regex did).
+func isUUID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		if !isHexByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isIPv4 matches ^\d{1,3}(\.\d{1,3}){3}$.
+func isIPv4(s string) bool {
+	groups, glen := 0, 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			glen++
+			if glen > 3 {
+				return false
+			}
+			continue
+		}
+		if c == '.' {
+			if glen == 0 {
+				return false
+			}
+			groups++
+			glen = 0
+			continue
+		}
+		return false
+	}
+	return groups == 3 && glen > 0
+}
+
+// isNumericToken matches ^-?\d+([.,]\d+)?$.
+func isNumericToken(s string) bool {
+	i := 0
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	digits := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+		digits++
+	}
+	if digits == 0 {
+		return false
+	}
+	if i == len(s) {
+		return true
+	}
+	if s[i] == '.' || s[i] == ',' {
+		i++
+		frac := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			frac++
+		}
+		return frac > 0 && i == len(s)
+	}
+	return false
+}
+
 type maskedLine struct {
-	toks  []string // original tokens (for variable samples)
-	mask  []string // masked tokens (for routing/template/similarity)
+	toks []string // original tokens (for variable samples)
+	mask []string // masked tokens (for routing/template/similarity)
 }
 
 func DrainCompress(text string, cfg DrainConfig) DrainResult {
@@ -127,7 +229,15 @@ func DrainCompress(text string, cfg DrainConfig) DrainResult {
 		// long as the input. Fail safe → caller keeps the original.
 		return DrainResult{Lines: len(lines), Templates: len(tpls), Reason: "poor repetition"}
 	}
-	sort.Slice(tpls, func(i, j int) bool { return tpls[i].count > tpls[j].count })
+	// Deterministic output matters: count desc, ties broken by pattern.
+	// Templates are collected from a map-driven tree walk, so without the
+	// tiebreaker equal-count templates would appear in random order.
+	sort.Slice(tpls, func(i, j int) bool {
+		if tpls[i].count != tpls[j].count {
+			return tpls[i].count > tpls[j].count
+		}
+		return strings.Join(tpls[i].pattern, " ") < strings.Join(tpls[j].pattern, " ")
+	})
 
 	var sb strings.Builder
 	shown := 0
@@ -145,7 +255,16 @@ func DrainCompress(text string, cfg DrainConfig) DrainResult {
 			for k := range t.samples {
 				vals = append(vals, k)
 			}
-			sort.Slice(vals, func(a, b int) bool { return t.samples[vals[a]] > t.samples[vals[b]] })
+			// Deterministic output matters: count desc, ties broken
+			// lexicographically. Map iteration order is random in Go, so
+			// without the tiebreaker the same log could yield different
+			// sample lines on every run.
+			sort.Slice(vals, func(a, b int) bool {
+				if t.samples[vals[a]] != t.samples[vals[b]] {
+					return t.samples[vals[a]] > t.samples[vals[b]]
+				}
+				return vals[a] < vals[b]
+			})
 			if len(vals) > cfg.MaxSamples {
 				vals = vals[:cfg.MaxSamples]
 			}
@@ -174,8 +293,13 @@ func DrainCompress(text string, cfg DrainConfig) DrainResult {
 
 func insertLine(root *dtNode, ml maskedLine, cfg DrainConfig) {
 	cur := root
-	for d := 0; d < cfg.Depth; d++ {
-		tok := ml.mask[d] // same bucket ⇒ same token count ⇒ index safe
+	// Lines shorter than the routing depth descend fewer levels; a bucket
+	// always holds same-length lines, so every line in it descends the same
+	// way and leaf matching stays consistent. (Before this guard, a log
+	// containing a <4-token line panicked here and fail-open disabled log
+	// compression for the whole message.)
+	for d := 0; d < cfg.Depth && d < len(ml.mask); d++ {
+		tok := ml.mask[d]
 		if child, ok := cur.kids[tok]; ok {
 			cur = child
 			continue

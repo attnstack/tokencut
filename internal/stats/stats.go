@@ -27,10 +27,10 @@ type ModelPricing struct {
 }
 
 type ModelStats struct {
-	Requests   uint64  `json:"requests"`
-	TokensOrig uint64  `json:"tokens_original"`
-	TokensFinal uint64 `json:"tokens_final"`
-	SavedUSD   float64 `json:"saved_usd"`
+	Requests    uint64  `json:"requests"`
+	TokensOrig  uint64  `json:"tokens_original"`
+	TokensFinal uint64  `json:"tokens_final"`
+	SavedUSD    float64 `json:"saved_usd"`
 }
 
 type RequestRecord struct {
@@ -152,20 +152,20 @@ func (r *Recorder) Snapshot() map[string]any {
 	recent := make([]RequestRecord, len(r.recent))
 	copy(recent, r.recent)
 	return map[string]any{
-		"version":            r.Version,
-		"uptime_seconds":     time.Since(r.startedAt).Seconds(),
-		"requests_total":     r.Requests,
-		"compressed_total":   r.Compressed,
-		"cache_hits_total":   r.CacheHits,
-		"tokens_original":    r.TokensOrig,
-		"tokens_final":       r.TokensFinal,
-		"compression_ratio":  ratio,
-		"saved_usd":          r.SavedUSD,
-		"strategies":         strategies,
-		"models":             models,
-		"recent":             recent,
-		"dropped_events":     r.DroppedEvents,
-		"estimation_note":    "token counts are tokencut estimates (chars/token calibrated), not tokenizer-exact",
+		"version":           r.Version,
+		"uptime_seconds":    time.Since(r.startedAt).Seconds(),
+		"requests_total":    r.Requests,
+		"compressed_total":  r.Compressed,
+		"cache_hits_total":  r.CacheHits,
+		"tokens_original":   r.TokensOrig,
+		"tokens_final":      r.TokensFinal,
+		"compression_ratio": ratio,
+		"saved_usd":         r.SavedUSD,
+		"strategies":        strategies,
+		"models":            models,
+		"recent":            recent,
+		"dropped_events":    r.DroppedEvents,
+		"estimation_note":   "token counts are tokencut estimates (chars/token calibrated), not tokenizer-exact",
 	}
 }
 

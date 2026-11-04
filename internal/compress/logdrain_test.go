@@ -80,16 +80,16 @@ func TestDrainSampleParamsPresent(t *testing.T) {
 
 func TestMaskToken(t *testing.T) {
 	cases := map[string]string{
-		"200":            "<*>",
-		"12ms":           "<*>",
-		"192.168.0.1":    "<*>",
+		"200":                                  "<*>",
+		"12ms":                                 "<*>",
+		"192.168.0.1":                          "<*>",
 		"550e8400-e29b-41d4-a716-446655440000": "<*>",
-		"status=200":     "status=<*>",
-		"INFO":           "INFO",
-		"GET":            "GET",
-		"/health":        "/health",
-		"connected":      "connected",
-		"HTTP/1.1":       "<*>", // digit rule: acceptable tradeoff, documented
+		"status=200":                           "status=<*>",
+		"INFO":                                 "INFO",
+		"GET":                                  "GET",
+		"/health":                              "/health",
+		"connected":                            "connected",
+		"HTTP/1.1":                             "<*>", // digit rule: acceptable tradeoff, documented
 	}
 	for in, want := range cases {
 		got, _ := maskToken(in)

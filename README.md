@@ -87,18 +87,21 @@ T3 sits at 74% on every tier, including no compression. Those payloads are
 small and barely compress; the number reflects what a 7B model can do with
 the questions, not what compression does to it. Reported as-is.
 
-Compression speed, measured with `go test -bench` on a Ryzen 7 7735H:
+Compression speed, measured with `go test -bench` on a Ryzen 7 7735H
+(best of repeated runs; reproduce with the command below):
 
 | workload | size | time |
 |---|---|---|
-| JSON pruning | 44 KB | 1.44 ms |
-| lossless canonicalization | 44 KB | 0.39 ms |
-| log template mining | 10k lines | 31.9 ms |
-| full request pipeline | 98 KB | 22.6 ms |
+| JSON pruning | 44 KB | 0.86 ms |
+| JSON pruning | 450 KB | 6.3 ms (27.7 MB/s) |
+| lossless canonicalization | 44 KB | 0.40 ms |
+| log template mining | 10k lines | 20.1 ms |
+| full request pipeline | 98 KB | 16.2 ms |
 
-One honest note: pruning goes superlinear past ~100KB because ancestor
-estimates are refreshed on every fold. Fine for typical tool outputs, worth
-fixing if you push half-megabyte payloads through.
+Scaling is close to linear now: the pruner keeps per-node aggregate sums
+incrementally, so each fold updates ancestors in O(1) instead of rescanning
+their children, and the tree is slab-allocated (10× the payload costs ~7×
+the time; the pre-refactor code cost ~17× and twice the allocations).
 
 ## How it works
 

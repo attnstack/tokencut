@@ -87,21 +87,27 @@ type jnode struct {
 	children []*jnode
 	est      int // EXACT additive rune count of this node's serialized VALUE (key excluded); tokens ≈ est/4
 	info     float64
-	depth    int
-	version  int  // bumped whenever the subtree changes; heap entries snapshot it
-	dead     bool // removed from the tree (inside a folded node)
-	omit     int  // array markers: number of omitted items
-	kwScore  int  // cached keyword hit count
-	kwVer    int  // kwScore cache validity marker
+	// Incremental aggregate state for internal nodes ('o'/'a'): maintained on
+	// every structural change so ancestor updates are O(1) per fold instead
+	// of O(siblings) re-scans. est derives from these in O(1) — see estFromSum.
+	childEstSum  int     // Σ contrib(c): c.est (+ c.keyEst when this node is an object)
+	childInfoSum float64 // Σ c.info
+	childCount   int
+	depth        int
+	version      int  // bumped whenever the subtree changes; heap entries snapshot it
+	dead         bool // removed from the tree (inside a folded node)
+	omit         int  // array markers: number of omitted items
+	kwScore      int  // cached keyword hit count
+	kwVer        int  // kwScore cache validity marker
 }
 
 type foldEntry struct {
-	n            *jnode
-	version      int
-	ratio        float64 // infoRemoved / saved for THIS operation
-	saved        int     // runes this operation frees
-	infoRemoved  float64 // info this operation loses
-	i, j         int     // array run bounds [i, j); i==j==0 means whole-node (object) fold
+	n           *jnode
+	version     int
+	ratio       float64 // infoRemoved / saved for THIS operation
+	saved       int     // runes this operation frees
+	infoRemoved float64 // info this operation loses
+	i, j        int     // array run bounds [i, j); i==j==0 means whole-node (object) fold
 }
 
 type foldHeap []foldEntry
@@ -119,11 +125,27 @@ func (h *foldHeap) Pop() any {
 }
 
 type jsonPruner struct {
-	cfg      JSONPruneConfig
-	keywords []Keyword
-	root     *jnode
-	h        foldHeap
-	folds    int
+	cfg        JSONPruneConfig
+	keywords   []Keyword
+	root       *jnode
+	h          foldHeap
+	folds      int
+	nodeChunks [][]jnode // slab arena: nodes are tree-lifetime, so chunked
+	// preallocation replaces ~50k individual mallocs on large payloads;
+	// chunk caps keep node pointers stable across growth
+}
+
+const nodeChunkSize = 1024
+
+func (p *jsonPruner) newNode() *jnode {
+	n := len(p.nodeChunks)
+	if n == 0 || len(p.nodeChunks[n-1]) == nodeChunkSize {
+		p.nodeChunks = append(p.nodeChunks, make([]jnode, 0, nodeChunkSize))
+		n = len(p.nodeChunks)
+	}
+	ch := &p.nodeChunks[n-1]
+	*ch = append(*ch, jnode{kwVer: -1})
+	return &(*ch)[len(*ch)-1]
 }
 
 // PruneJSON compresses input to at most budgetTokens (estimated). keywords
@@ -141,6 +163,18 @@ func PruneJSON(input string, budgetTokens int, keywords []Keyword, cfg JSONPrune
 	if _, err := dec.Token(); err != io.EOF {
 		return "", nil, ErrNotJSON
 	}
+	return pruneFromValue(root, input, rep, budgetTokens, keywords, cfg)
+}
+
+// PruneJSONValue is PruneJSON for an already-decoded document (from
+// CanonicalJSONValue), saving a full re-decode of the canonical form.
+// input is returned unchanged on the Kept path; origEst must be the token
+// estimate of that input.
+func PruneJSONValue(root any, input string, origEst, budgetTokens int, keywords []Keyword, cfg JSONPruneConfig) (string, *PruneReport, error) {
+	return pruneFromValue(root, input, &PruneReport{OriginalTokens: origEst}, budgetTokens, keywords, cfg)
+}
+
+func pruneFromValue(root any, input string, rep *PruneReport, budgetTokens int, keywords []Keyword, cfg JSONPruneConfig) (string, *PruneReport, error) {
 	if rep.OriginalTokens <= budgetTokens {
 		rep.Kept = true
 		rep.FinalTokens = rep.OriginalTokens
@@ -248,13 +282,20 @@ func capStrings(v any, cap int, count *int) any {
 // lowercaseKeywords lives in keywords.go next to the Keyword type.
 
 func (p *jsonPruner) build(v any, key string, depth int, parent *jnode) *jnode {
-	n := &jnode{parent: parent, key: key, depth: depth, kwVer: -1}
+	n := p.newNode()
+	n.parent = parent
+	n.key = key
+	n.depth = depth
 	if parent != nil && parent.kind == 'o' {
-		kb, err := marshalNoHTML(key)
-		if err != nil {
-			kb = jsonMarshalKey(key)
+		if kb, ok := quoteStringFast(key); ok {
+			n.keyJSON = kb
+		} else {
+			kb, err := marshalNoHTML(key)
+			if err != nil {
+				kb = jsonMarshalKey(key)
+			}
+			n.keyJSON = kb
 		}
-		n.keyJSON = kb
 		n.keyEst = utf8.RuneCountInString(n.keyJSON) + 1 // + colon
 	}
 	switch t := v.(type) {
@@ -267,26 +308,36 @@ func (p *jsonPruner) build(v any, key string, depth int, parent *jnode) *jnode {
 		sort.Strings(keys) // deterministic output for identical input
 		n.children = make([]*jnode, 0, len(keys))
 		for _, k := range keys {
-			n.children = append(n.children, p.build(t[k], k, depth+1, n))
+			c := p.build(t[k], k, depth+1, n)
+			n.children = append(n.children, c)
+			n.childEstSum += c.keyEst + c.est
+			n.childInfoSum += c.info
+			n.childCount++
 		}
-		n.est = p.estOf('o', n.children)
-		n.info = sumInfo(n.children)
+		n.est = estFromSum(n.childCount, n.childEstSum)
+		n.info = n.childInfoSum
 	case []any:
 		n.kind = 'a'
 		n.children = make([]*jnode, 0, len(t))
 		for _, item := range t {
-			n.children = append(n.children, p.build(item, "", depth+1, n))
+			c := p.build(item, "", depth+1, n)
+			n.children = append(n.children, c)
+			n.childEstSum += c.est
+			n.childInfoSum += c.info
+			n.childCount++
 		}
-		n.est = p.estOf('a', n.children)
-		n.info = sumInfo(n.children)
+		n.est = estFromSum(n.childCount, n.childEstSum)
+		n.info = n.childInfoSum
 	case string:
 		n.kind = 's'
-		raw, err := marshalNoHTML(t)
-		if err != nil {
+		if raw, ok := quoteStringFast(t); ok {
+			n.raw = raw
+		} else if raw, err := marshalNoHTML(t); err == nil {
+			n.raw = raw
+		} else {
 			b, _ := json.Marshal(t)
-			raw = string(b)
+			n.raw = string(b)
 		}
-		n.raw = raw
 		n.est = utf8.RuneCountInString(n.raw)
 		n.info = leafInfo(n, p.cfg)
 	case json.Number:
@@ -342,27 +393,16 @@ func leafInfo(n *jnode, cfg JSONPruneConfig) float64 {
 	return float64(n.est) * typeW * keyW / (1 + 0.1*float64(n.depth))
 }
 
-func sumInfo(children []*jnode) float64 {
-	var s float64
-	for _, c := range children {
-		s += c.info
+// estFromSum is the closed form of the old O(children) estOf: for an
+// internal node with count children and contribution sum Σ,
+//   est = 2                      (count == 0)
+//   est = 2 + (count-1) + Σ      (count ≥ 1)  == 1 + count + Σ
+// Values are identical to the old scan; this just makes them O(1).
+func estFromSum(count, sum int) int {
+	if count == 0 {
+		return 2
 	}
-	return s
-}
-
-func (p *jsonPruner) estOf(kind byte, children []*jnode) int {
-	total := 2 // brackets
-	if len(children) > 1 {
-		total += len(children) - 1 // commas
-	}
-	for _, c := range children {
-		if kind == 'o' {
-			total += c.keyEst + c.est
-		} else {
-			total += c.est
-		}
-	}
-	return total
+	return 1 + count + sum
 }
 
 func (p *jsonPruner) eligible(n *jnode) bool {
@@ -397,8 +437,7 @@ func (p *jsonPruner) pushCandidates(n *jnode) {
 		if len(p.keywords) > 0 && p.kwScore(n) > 0 {
 			return
 		}
-		if newChildren, removed, saved, infoRemoved := p.planObjectFold(n); saved >= 1 {
-			_, _ = newChildren, removed
+		if saved, infoRemoved := p.objectFoldSaved(n); saved >= 1 {
 			heap.Push(&p.h, foldEntry{n: n, version: n.version, ratio: infoRemoved / float64(saved),
 				saved: saved, infoRemoved: infoRemoved})
 		}
@@ -412,7 +451,7 @@ func (p *jsonPruner) pushCandidates(n *jnode) {
 		{2 + m/2, len(n.children) - 2}, // right half
 	}
 	for _, r := range runs {
-		if _, _, saved, infoRemoved := p.planRunFold(n, r[0], r[1]); saved >= 1 {
+		if saved, infoRemoved := p.runFoldSaved(n, r[0], r[1]); saved >= 1 {
 			heap.Push(&p.h, foldEntry{n: n, version: n.version, ratio: infoRemoved / float64(saved),
 				saved: saved, infoRemoved: infoRemoved, i: r[0], j: r[1]})
 		}
@@ -429,86 +468,161 @@ func (p *jsonPruner) walkPush(n *jnode) {
 	}
 }
 
-// planObjectFold: keep high-value-key members, fold everything else into a
-// single `"…": "N fields omitted"` member. Keeping the ids the model needs
-// for follow-up tool calls is why this beats "drop the whole object".
+// objectFoldSaved computes, allocation-free, what objectFoldCommit would
+// achieve right now: keep high-value-key members, fold everything else into
+// a single `"...": "N fields omitted"` member. Keeping the ids the model
+// needs for follow-up tool calls is why this beats "drop the whole object".
 // (Query-relevant members are protected one level up: an object the query
 // references is excluded from candidacy entirely.)
-func (p *jsonPruner) planObjectFold(n *jnode) (newChildren, removed []*jnode, saved int, infoRemoved float64) {
-	var kept []*jnode
+func (p *jsonPruner) objectFoldSaved(n *jnode) (saved int, infoRemoved float64) {
+	removedEst, removedInfo, removedCount := 0, 0.0, 0
 	for _, c := range n.children {
-		if _, hv := p.cfg.HighValueKeys[c.key]; hv {
-			kept = append(kept, c)
-		} else {
-			removed = append(removed, c)
+		if _, hv := p.cfg.HighValueKeys[c.key]; !hv {
+			removedEst += c.keyEst + c.est
+			removedInfo += c.info
+			removedCount++
 		}
 	}
-	if len(removed) == 0 {
-		return nil, nil, 0, 0
+	if removedCount == 0 {
+		return 0, 0
 	}
 	markerKey := `"..."`
-	markerRaw := fmt.Sprintf(`"%d fields omitted"`, len(removed))
-	marker := &jnode{
-		parent: n, key: "...", keyJSON: markerKey,
-		keyEst: utf8.RuneCountInString(markerKey) + 1,
-		kind:   's', raw: markerRaw,
-		est: utf8.RuneCountInString(markerRaw), depth: n.depth + 1, kwVer: -1,
-	}
-	newChildren = append(newChildren, kept...)
-	newChildren = append(newChildren, marker)
-	saved = n.est - p.estOf('o', newChildren)
+	markerRaw := fmt.Sprintf(`"%d fields omitted"`, removedCount)
+	newEst := estFromSum(n.childCount-removedCount+1,
+		n.childEstSum-removedEst+utf8.RuneCountInString(markerKey)+1+utf8.RuneCountInString(markerRaw))
+	saved = n.est - newEst
 	if saved < 1 {
-		return nil, nil, 0, 0
+		return 0, 0
 	}
-	for _, c := range removed {
-		infoRemoved += c.info
-	}
-	return newChildren, removed, saved, infoRemoved
+	return saved, removedInfo
 }
 
-// planRunFold plans replacing children[i:j] with a single {"_omitted": N}
-// marker. The first 2 and last 2 children are structurally protected (the
-// candidate generator never proposes runs that touch them). Markers inside
-// the run merge into the new count, so repeated folds compose cleanly.
-// Query-relevant items inside the run survive (up to KeywordSample).
-func (p *jsonPruner) planRunFold(n *jnode, i, j int) (newChildren, removed []*jnode, saved int, infoRemoved float64) {
-	if i < 2 || j > len(n.children)-2 || j-i < 2 {
-		return nil, nil, 0, 0
+// objectFoldCommit applies the fold objectFoldSaved described. The children
+// slice is compacted in place (kept members forward, marker appended), so no
+// new slice is allocated; aggregate sums are maintained incrementally.
+func (p *jsonPruner) objectFoldCommit(n *jnode) bool {
+	removedEst, removedInfo, removedCount := 0, 0.0, 0
+	w := 0
+	var removed []*jnode
+	for _, c := range n.children {
+		if _, hv := p.cfg.HighValueKeys[c.key]; hv {
+			n.children[w] = c
+			w++
+			continue
+		}
+		removedEst += c.keyEst + c.est
+		removedInfo += c.info
+		removedCount++
+		removed = append(removed, c)
 	}
-	omit := 0
-	unfolded := 0
-	for _, c := range n.children[i:j] {
+	if removedCount == 0 {
+		return false
+	}
+	markerKey := `"..."`
+	markerRaw := fmt.Sprintf(`"%d fields omitted"`, removedCount)
+	marker := p.newNode()
+	marker.parent = n
+	marker.key = "..."
+	marker.keyJSON = markerKey
+	marker.keyEst = utf8.RuneCountInString(markerKey) + 1
+	marker.kind = 's'
+	marker.raw = markerRaw
+	marker.est = utf8.RuneCountInString(markerRaw)
+	marker.depth = n.depth + 1
+	n.children[w] = marker
+	n.children = n.children[:w+1]
+	for _, r := range removed {
+		p.detach(r)
+	}
+	n.childCount = w + 1
+	n.childEstSum += (marker.keyEst + marker.est) - removedEst
+	n.childInfoSum -= removedInfo
+	n.est = estFromSum(n.childCount, n.childEstSum)
+	n.info = n.childInfoSum
+	return true
+}
+
+// runFoldSaved computes, allocation-free except for the keyword candidate
+// list (only when keywords are set), what runFoldCommit would achieve right
+// now: replace children[i:j] with a single {"_omitted": N} marker, keeping
+// protected head/tail untouched and query-relevant items visible.
+func (p *jsonPruner) runFoldSaved(n *jnode, i, j int) (saved int, infoRemoved float64) {
+	if i < 2 || j > len(n.children)-2 || j-i < 2 {
+		return 0, 0
+	}
+	omit, unfolded, markers := 0, 0, 0
+	itemEst, itemInfo := 0, 0.0
+	markerEstSum := 0
+	type kwCand struct {
+		c *jnode
+		s int
+	}
+	var cands []kwCand
+	for r := i; r < j; r++ {
+		c := n.children[r]
 		if c.kind == 'm' {
 			omit += c.omit
-		} else {
-			omit++
-			unfolded++
+			markers++
+			markerEstSum += c.est
+			continue
 		}
-	}
-	if unfolded == 0 {
-		// Nothing to remove (marker-merge only pays when ≥2 markers collapse
-		// into one; a single marker re-folded into itself saves nothing).
-		markers := 0
-		for _, c := range n.children[i:j] {
-			if c.kind == 'm' {
-				markers++
+		omit++
+		unfolded++
+		itemEst += c.est
+		itemInfo += c.info
+		if len(p.keywords) > 0 && p.cfg.KeywordSample > 0 {
+			if s := p.kwScore(c); s > 0 {
+				cands = append(cands, kwCand{c, s})
 			}
 		}
-		if markers < 2 {
-			return nil, nil, 0, 0
-		}
 	}
-	keepSet := map[*jnode]bool{}
-	if len(p.keywords) > 0 && p.cfg.KeywordSample > 0 {
+	if unfolded == 0 && markers < 2 {
+		// Nothing to remove (marker-merge only pays when ≥2 markers collapse
+		// into one; a single marker re-folded into itself saves nothing).
+		return 0, 0
+	}
+	keptCount, keptEst, keptInfo := 0, 0, 0.0
+	if len(p.keywords) > 0 && p.cfg.KeywordSample > 0 && len(cands) > 0 {
 		// Rank by hit count, not first-come: a generic question word (e.g.
 		// "product") gives EVERY item score 1, while the specific value the
 		// query names ("Zephyr-002") scores higher — top-K must pick it.
+		sort.Slice(cands, func(a, b int) bool { return cands[a].s > cands[b].s })
+		for k := 0; k < len(cands) && k < p.cfg.KeywordSample; k++ {
+			keptCount++
+			keptEst += cands[k].c.est
+			keptInfo += cands[k].c.info
+		}
+	}
+	omit -= keptCount
+	markerRaw := fmt.Sprintf(`{"_omitted": %d}`, omit)
+	removedCount := (j - i) - keptCount
+	newEst := estFromSum(n.childCount-removedCount,
+		n.childEstSum-markerEstSum-itemEst+keptEst+utf8.RuneCountInString(markerRaw))
+	saved = n.est - newEst
+	if saved < 1 || removedCount == 0 {
+		return 0, 0
+	}
+	return saved, itemInfo - keptInfo
+}
+
+// runFoldCommit applies the fold runFoldSaved described, compacting the
+// children slice in place: [0,i) untouched, kept items forward, marker, then
+// the old tail copied over the consumed region. Aggregate sums are
+// maintained incrementally; the old planRunFold's full-slice rebuild and
+// O(children) est rescan are gone.
+func (p *jsonPruner) runFoldCommit(n *jnode, i, j int) bool {
+	if i < 2 || j > len(n.children)-2 || j-i < 2 {
+		return false
+	}
+	keepSet := map[*jnode]bool{}
+	if len(p.keywords) > 0 && p.cfg.KeywordSample > 0 {
 		type kwCand struct {
 			c *jnode
 			s int
 		}
 		var cands []kwCand
-		for _, c := range n.children[i:j] {
+		for r := i; r < j; r++ {
+			c := n.children[r]
 			if c.kind != 'm' {
 				if s := p.kwScore(c); s > 0 {
 					cands = append(cands, kwCand{c, s})
@@ -520,57 +634,89 @@ func (p *jsonPruner) planRunFold(n *jnode, i, j int) (newChildren, removed []*jn
 			keepSet[cands[k].c] = true
 		}
 	}
-	var kept []*jnode
-	for _, c := range n.children[i:j] {
+	omit, removedEst, removedInfo, removedCount := 0, 0, 0.0, 0
+	var removed []*jnode
+	for r := i; r < j; r++ {
+		c := n.children[r]
 		if keepSet[c] {
-			kept = append(kept, c)
-			omit-- // stays visible; not omitted
+			continue
 		}
+		if c.kind == 'm' {
+			omit += c.omit
+		} else {
+			omit++
+		}
+		removedEst += c.est
+		removedInfo += c.info
+		removedCount++
+		removed = append(removed, c)
+	}
+	if removedCount == 0 {
+		return false
 	}
 	markerRaw := fmt.Sprintf(`{"_omitted": %d}`, omit)
-	marker := &jnode{parent: n, kind: 'm', raw: markerRaw, omit: omit,
-		est: utf8.RuneCountInString(markerRaw), depth: n.depth + 1, kwVer: -1}
-	newChildren = append(newChildren, n.children[:i]...)
-	newChildren = append(newChildren, kept...)
-	newChildren = append(newChildren, marker)
-	newChildren = append(newChildren, n.children[j:]...)
-	for _, c := range n.children[i:j] {
-		if !keepSet[c] {
-			removed = append(removed, c)
+	marker := p.newNode()
+	marker.parent = n
+	marker.kind = 'm'
+	marker.raw = markerRaw
+	marker.omit = omit
+	marker.est = utf8.RuneCountInString(markerRaw)
+	marker.depth = n.depth + 1
+	// Defensive re-check (O(1)): the caller verified stats at the same
+	// version, but never let a fold grow the node even if state drifted.
+	newEst := estFromSum(n.childCount-removedCount, n.childEstSum-removedEst+marker.est)
+	if n.est-newEst < 1 {
+		return false
+	}
+	// in-place compact: [i, w) = kept items, then marker, then old tail
+	w := i
+	for r := i; r < j; r++ {
+		if keepSet[n.children[r]] {
+			n.children[w] = n.children[r]
+			w++
 		}
 	}
-	saved = n.est - p.estOf('a', newChildren)
-	if saved < 1 || len(removed) == 0 {
-		return nil, nil, 0, 0
+	n.children[w] = marker
+	w++
+	copy(n.children[w:], n.children[j:])
+	n.children = n.children[:w+len(n.children)-j]
+	for _, r := range removed {
+		p.detach(r)
 	}
-	for _, c := range removed {
-		infoRemoved += c.info
-	}
-	return newChildren, removed, saved, infoRemoved
+	n.childCount = len(n.children)
+	n.childEstSum += marker.est - removedEst
+	n.childInfoSum -= removedInfo
+	n.est = estFromSum(n.childCount, n.childEstSum)
+	n.info = n.childInfoSum
+	return true
 }
 
-// foldNode commits the plan carried by the heap entry and updates ancestors.
+// foldNode commits the fold carried by the heap entry and updates ancestors
+// incrementally: each ancestor's aggregate sums change by exactly the folded
+// node's est/info delta, so the walk is O(depth) with O(1) per level —
+// the old code re-scanned every ancestor's full children list per fold,
+// which is what made large payloads superlinear.
 func (p *jsonPruner) foldNode(e foldEntry) {
 	n := e.n
-	var newChildren, removed []*jnode
 	isArray := false
 	switch n.kind {
 	case 'o':
-		newChildren, removed, _, _ = p.planObjectFold(n)
+		isArray = false
 	case 'a':
-		newChildren, removed, _, _ = p.planRunFold(n, e.i, e.j)
 		isArray = true
 	default:
 		return
 	}
-	if newChildren == nil {
+	oldEst, oldInfo := n.est, n.info
+	var committed bool
+	if isArray {
+		committed = p.runFoldCommit(n, e.i, e.j)
+	} else {
+		committed = p.objectFoldCommit(n)
+	}
+	if !committed {
 		return
 	}
-	for _, r := range removed {
-		p.detach(r)
-	}
-	n.children = newChildren
-	p.refreshSubtree(n)
 	p.folds++
 	// An array that just folded may now offer finer runs (halves of what
 	// remains) — re-seed its own candidates before walking up.
@@ -578,18 +724,16 @@ func (p *jsonPruner) foldNode(e foldEntry) {
 		n.version++
 		p.pushCandidates(n)
 	}
+	// Propagate the folded node's delta up the ancestor chain: each
+	// ancestor's child contribution changes by (new − old) of n.
+	dEst, dInfo := n.est-oldEst, n.info-oldInfo
 	for a := n.parent; a != nil; a = a.parent {
+		a.childEstSum += dEst
+		a.childInfoSum += dInfo
+		a.est = estFromSum(a.childCount, a.childEstSum)
+		a.info = a.childInfoSum
 		a.version++
-		p.refreshSubtree(a)
 		p.pushCandidates(a)
-	}
-}
-
-// refreshSubtree recomputes est/info of an internal node in place.
-func (p *jsonPruner) refreshSubtree(n *jnode) {
-	if n.kind == 'o' || n.kind == 'a' {
-		n.est = p.estOf(n.kind, n.children)
-		n.info = sumInfo(n.children)
 	}
 }
 

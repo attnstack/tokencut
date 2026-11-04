@@ -20,7 +20,7 @@ import (
 )
 
 type Config struct {
-	Tier           string  // lossless | balanced | aggressive
+	Tier           string // lossless | balanced | aggressive
 	Targets        map[string]float64
 	ExemptSystem   bool
 	ExemptLastUser bool
@@ -54,17 +54,17 @@ type MessageReport struct {
 }
 
 type Report struct {
-	Enabled        bool                 `json:"enabled"`
-	Model          string               `json:"model"`
-	OverrideTier   string               `json:"override_tier,omitempty"`
-	Messages       []MessageReport      `json:"messages"`
-	OriginalTokens int                  `json:"original_tokens"`
-	FinalTokens    int                  `json:"final_tokens"`
-	Ratio          float64              `json:"ratio"` // 1 - final/orig
-	Strategies     map[string]int       `json:"strategies"`
-	CacheHits      int                  `json:"cache_hits"`
-	Changed        bool                 `json:"changed"`
-	Note           string               `json:"note,omitempty"`
+	Enabled        bool            `json:"enabled"`
+	Model          string          `json:"model"`
+	OverrideTier   string          `json:"override_tier,omitempty"`
+	Messages       []MessageReport `json:"messages"`
+	OriginalTokens int             `json:"original_tokens"`
+	FinalTokens    int             `json:"final_tokens"`
+	Ratio          float64         `json:"ratio"` // 1 - final/orig
+	Strategies     map[string]int  `json:"strategies"`
+	CacheHits      int             `json:"cache_hits"`
+	Changed        bool            `json:"changed"`
+	Note           string          `json:"note,omitempty"`
 }
 
 type Controller struct {
@@ -525,12 +525,15 @@ func (c *Controller) compressText(ctx context.Context, m *wireMessage, partIdx i
 	best := orig
 	bestTok := tokenest.EstimateFor(m.cKind, best)
 	strat := ""
+	var decodedJSON any // canonical-stage decode result, reused by the pruner
 
 	// Stage 1 — lossless canonicalization (JSON only): sorted keys, compact
 	// separators. Zero information change. Kind is precomputed per message.
+	// The decoded value is kept so Stage 3 skips a full re-decode.
 	res := classify.Result{Kind: classify.Kind(m.cKind), Confidence: 1}
 	if res.Kind == classify.JSON {
-		if canon, err := compress.CanonicalJSON(best); err == nil {
+		if canon, val, err := compress.CanonicalJSONValue(best); err == nil {
+			decodedJSON = val
 			if tok := tokenest.EstimateFor(m.cKind, canon); tok < bestTok {
 				best, bestTok, strat = canon, tok, "canonical"
 			}
@@ -559,7 +562,14 @@ func (c *Controller) compressText(ctx context.Context, m *wireMessage, partIdx i
 	if bestTok > targetTok && ratio > 0 {
 		switch res.Kind {
 		case classify.JSON:
-			out, pr, err := compress.PruneJSON(best, targetTok, keywords, c.cfg.Prune)
+			var out string
+			var pr *compress.PruneReport
+			var err error
+			if decodedJSON != nil {
+				out, pr, err = compress.PruneJSONValue(decodedJSON, best, bestTok, targetTok, keywords, c.cfg.Prune)
+			} else {
+				out, pr, err = compress.PruneJSON(best, targetTok, keywords, c.cfg.Prune)
+			}
 			if err == nil && pr.FinalTokens < bestTok {
 				best, bestTok, strat = out, pr.FinalTokens, "json-prune"
 				if c.cfg.Cache != nil && cacheKey != "" {

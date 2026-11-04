@@ -44,22 +44,48 @@ func marshalNoHTML(v any) (string, error) {
 	return strings.TrimSuffix(sb.String(), "\n"), nil
 }
 
+// quoteStringFast produces the JSON encoding of s when s is plain printable
+// ASCII (no quote, backslash, DEL or control bytes): the encoding is then
+// exactly the string wrapped in quotes, which lets the tree builder skip
+// json.Encoder entirely for the overwhelmingly common alphanumeric case.
+// Returns ok=false for anything exotic; callers fall back to marshalNoHTML,
+// whose output this must match byte-for-byte.
+func quoteStringFast(s string) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7E || c == '"' || c == '\\' {
+			return "", false
+		}
+	}
+	return `"` + s + `"`, true
+}
+
 // CanonicalJSON re-serializes JSON with sorted keys, no insignificant
 // whitespace and no HTML escaping. This is the "lossless" stage: zero
 // information change, often 20–40% fewer characters on pretty-printed
-// payloads.
+// payloads. CanonicalJSONValue additionally returns the decoded value so the
+// JSON pruner can skip its own re-decode of the canonical form.
 func CanonicalJSON(s string) (string, error) {
+	out, _, err := CanonicalJSONValue(s)
+	return out, err
+}
+
+func CanonicalJSONValue(s string) (string, any, error) {
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber() // preserve numeric literals bit-for-bit (no float64 rounding)
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// Reject trailing garbage after the first JSON value.
 	if _, err := dec.Token(); err != io.EOF {
-		return "", err
+		return "", nil, err
 	}
-	return marshalNoHTML(v)
+	out, err := marshalNoHTML(v)
+	if err != nil {
+		return "", nil, err
+	}
+	return out, v, nil
 }
 
 func collapseWhitespace(s string) string {

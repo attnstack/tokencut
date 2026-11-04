@@ -18,18 +18,18 @@ type PricingEntry struct {
 }
 
 type Config struct {
-	Listen             string
-	Upstream           string
-	Tier               string
-	Targets            map[string]float64
-	ExemptSystem       bool
-	ExemptLastUser     bool
-	CacheEnabled       bool
-	CacheCapacity      int
-	DiffMode           bool
-	LatencyBudgetMS    int
-	MaxBodyBytes       int
-	RateRPS            float64
+	Listen          string
+	Upstream        string
+	Tier            string
+	Targets         map[string]float64
+	ExemptSystem    bool
+	ExemptLastUser  bool
+	CacheEnabled    bool
+	CacheCapacity   int
+	DiffMode        bool
+	LatencyBudgetMS int
+	MaxBodyBytes    int
+	RateRPS         float64
 	// TokenKindConstants maps classify kind → ASCII chars per token; fitted
 	// by bench/calibrate.py (see methodology). TokenWidePerToken prices
 	// non-ASCII runes for every kind.
@@ -45,18 +45,18 @@ type Config struct {
 
 func Default() *Config {
 	return &Config{
-		Listen:             "127.0.0.1:8787",
-		Upstream:           "https://api.openai.com",
-		Tier:               "balanced",
-		Targets:            map[string]float64{"balanced": 0.60, "aggressive": 0.90, "lossless": 0},
-		ExemptSystem:       true,
-		ExemptLastUser:     true,
-		CacheEnabled:       true,
-		CacheCapacity:      1024,
-		DiffMode:           true,
-		LatencyBudgetMS:    30,
-		MaxBodyBytes:       32 << 20,
-		RateRPS:            0,
+		Listen:          "127.0.0.1:8787",
+		Upstream:        "https://api.openai.com",
+		Tier:            "balanced",
+		Targets:         map[string]float64{"balanced": 0.60, "aggressive": 0.90, "lossless": 0},
+		ExemptSystem:    true,
+		ExemptLastUser:  true,
+		CacheEnabled:    true,
+		CacheCapacity:   1024,
+		DiffMode:        true,
+		LatencyBudgetMS: 30,
+		MaxBodyBytes:    32 << 20,
+		RateRPS:         0,
 		TokenKindConstants: map[string]float64{
 			// cl100k_base fits on the benchmark corpus (bench/calibrate.py);
 			// o200k_base ASCII constants agree within ~1%.
@@ -66,8 +66,8 @@ func Default() *Config {
 			"text": 4.46,
 		},
 		TokenWidePerToken: 0.74,
-		LongStringCap:      2000,
-		KeywordSample:      2,
+		LongStringCap:     2000,
+		KeywordSample:     2,
 		HighValueKeys: []string{
 			"id", "name", "type", "status", "error", "code", "message", "url", "data", "key", "path", "file",
 		},
@@ -227,7 +227,7 @@ func (c *Config) applyMap(raw map[string]any) error {
 			return 0, false
 		}
 		for _, kind := range []string{"json", "log", "code", "text", "table", "html"} {
-			if v, ok := getFloat(kind+"_chars_per_token"); ok && v > 0 {
+			if v, ok := getFloat(kind + "_chars_per_token"); ok && v > 0 {
 				if c.TokenKindConstants == nil {
 					c.TokenKindConstants = map[string]float64{}
 				}

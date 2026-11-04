@@ -47,9 +47,11 @@ func Sniff(s string) Result {
 	if t == "" {
 		return Result{Text, 0.5}
 	}
-	// Fast path: full-string JSON validity. Only object/array roots are worth
-	// compressing structurally; a bare JSON string adds nothing.
-	if json.Valid([]byte(t)) && (t[0] == '{' || t[0] == '[') {
+	// Fast path: full-string JSON validity, gated on the first byte so
+	// non-JSON content skips the O(n) []byte copy + scan entirely. (Only
+	// object/array roots are worth compressing structurally; a bare JSON
+	// string adds nothing.)
+	if (t[0] == '{' || t[0] == '[') && json.Valid([]byte(t)) {
 		return Result{JSON, 0.95}
 	}
 	// Sniff a window, not the whole payload: patterns are front/back-loaded.
